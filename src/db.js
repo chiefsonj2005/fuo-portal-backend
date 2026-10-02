@@ -1,3 +1,5 @@
+import "dotenv/config";
+import pg from "pg";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -22,6 +24,30 @@ const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 const USE_REDIS = Boolean(REDIS_URL && REDIS_TOKEN);
 const REDIS_KEY = "fuo_portal_db";
+const USE_PG = Boolean(process.env.DATABASE_URL);
+const pool = USE_PG
+  ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 3 })
+  : null;
+
+async function pgLoad() {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS app_data (
+       key TEXT PRIMARY KEY,
+       value JSONB NOT NULL,
+       updated_at TIMESTAMPTZ DEFAULT now()
+     )`
+  );
+  const { rows } = await pool.query("SELECT value FROM app_data WHERE key = $1", [REDIS_KEY]);
+  return rows.length ? rows[0].value : null;
+}
+
+async function pgSave(data) {
+  await pool.query(
+    `INSERT INTO app_data (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [REDIS_KEY, JSON.stringify(data)]
+  );
+}
 
 async function redisLoad() {
   const res = await fetch(`${REDIS_URL}/get/${REDIS_KEY}`, {
@@ -68,10 +94,12 @@ function fileSave(data) {
 }
 
 async function loadData() {
+  if (USE_PG) return pgLoad();
   return USE_REDIS ? redisLoad() : fileLoad();
 }
 
 async function saveData(data) {
+  if (USE_PG) return pgSave(data);
   return USE_REDIS ? redisSave(data) : fileSave(data);
 }
 
@@ -96,8 +124,11 @@ let cache = null;
 export async function initDb() {
   let data = await loadData();
   if (!data) {
-    const adminUsername = process.env.ADMIN_USERNAME || "Chiefson.Favour";
-    const adminPassword = process.env.ADMIN_PASSWORD || "Justt_Jay170205";
+      const adminUsername = process.env.ADMIN_USERNAME;
+   const adminPassword = process.env.ADMIN_PASSWORD;
+   if (!adminUsername || !adminPassword) {
+     throw new Error("Set ADMIN_USERNAME and ADMIN_PASSWORD before first start.");
+   }
     data = {
       users: [
         {
@@ -126,7 +157,7 @@ export async function initDb() {
     if (changed) await saveData(data);
   }
   cache = data;
-  console.log(`Data store: ${USE_REDIS ? "Upstash Redis (persistent)" : "local file (data/db.json)"}`);
+   console.log(`Data store: ${USE_PG ? "Neon Postgres (persistent)" : USE_REDIS ? "Upstash Redis (persistent)" : "local file (data/db.json)"}`);
   return cache;
 }
 
